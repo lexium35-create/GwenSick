@@ -1,170 +1,269 @@
 "use client";
 
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 type Message = { role: "user" | "assistant"; content: string };
+type Session = { id: string; title: string; mode: string; updated: number; messages: Message[] };
 
-const starterPrompts = [
-  { title: "Review a decision", text: "Pressure-test a decision I'm making. Find the weak assumption and give me your verdict." },
-  { title: "Build a plan", text: "Turn this idea into a concrete plan with priorities, risks, and the next three moves." },
-  { title: "Analyze a problem", text: "Help me break down a difficult problem and identify the highest-leverage move." },
+type Mode = { id: string; name: string; description: string; prompt: string };
+
+const MODES: Mode[] = [
+  { id: "analyst", name: "ANALYST", description: "Pressure-test decisions and find the real leverage point.", prompt: "Act as a rigorous strategic analyst. Challenge assumptions, identify leverage, and give a clear verdict." },
+  { id: "coach", name: "COACH", description: "Turn a messy objective into an executable improvement loop.", prompt: "Act as a demanding but constructive performance coach. Diagnose the bottleneck and give concrete drills, habits, and checkpoints." },
+  { id: "planner", name: "PLANNER", description: "Convert an objective into priorities, dependencies, and next actions.", prompt: "Act as an execution planner. Sequence the work, expose dependencies, identify risks, and make the next actions unambiguous." },
+  { id: "scout", name: "SCOUT", description: "Compare options, surface evidence gaps, and map the field.", prompt: "Act as a scouting and research analyst. Separate known facts from inference, compare alternatives, and identify what must be verified." },
 ];
 
+const STARTERS = [
+  ["01", "PRESSURE TEST", "Find the weakest assumption in a decision."],
+  ["02", "BUILD A PLAN", "Turn an objective into the next three moves."],
+  ["03", "FIND THE BOTTLENECK", "Diagnose what is actually holding progress back."],
+  ["04", "SCOUT THE FIELD", "Compare options and expose evidence gaps."],
+];
+
+const STORAGE_KEY = "gwensick.sessions.v1";
+const MODE_KEY = "gwensick.mode.v1";
+
+function makeId() { return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`; }
+function makeTitle(text: string) { return text.trim().replace(/\s+/g, " ").slice(0, 46) || "Untitled session"; }
+
+function Icon({ name }: { name: "menu" | "plus" | "search" | "copy" | "download" | "trash" | "close" | "spark" | "send" | "stop" | "chevron" }) {
+  const paths: Record<string, React.ReactNode> = {
+    menu: <><path d="M4 7h16M4 12h16M4 17h16" /></>,
+    plus: <><path d="M12 5v14M5 12h14" /></>,
+    search: <><circle cx="10.8" cy="10.8" r="6.8" /><path d="m16 16 4 4" /></>,
+    copy: <><rect x="8" y="8" width="11" height="11" rx="1.5" /><path d="M5 15H4.5A1.5 1.5 0 0 1 3 13.5v-9A1.5 1.5 0 0 1 4.5 3h9A1.5 1.5 0 0 1 15 4.5V5" /></>,
+    download: <><path d="M12 3v12M7 10l5 5 5-5M4 20h16" /></>,
+    trash: <><path d="M4 7h16M9 11v5M15 11v5M6 7l1 13h10l1-13M9 7V4h6v3" /></>,
+    close: <><path d="m5 5 14 14M19 5 5 19" /></>,
+    spark: <><path d="m12 3 1.5 6.5L20 11l-6.5 1.5L12 19l-1.5-6.5L4 11l6.5-1.5L12 3Z" /></>,
+    send: <><path d="M4 4.5 20 12 4 19.5l3-7.5-3-7.5Z" /><path d="M7 12h13" /></>,
+    stop: <><rect x="6" y="6" width="12" height="12" rx="2" /></>,
+    chevron: <path d="m6 9 6 6 6-6" />,
+  };
+  return <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">{paths[name]}</svg>;
+}
+
 export default function Home() {
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [sessions, setSessions] = useState<Session[]>([]);
+  const [activeId, setActiveId] = useState("");
+  const [modeId, setModeId] = useState("analyst");
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [modeOpen, setModeOpen] = useState(false);
+  const [search, setSearch] = useState("");
+  const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
+  const [notice, setNotice] = useState("");
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const endRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
+
+  const mode = MODES.find((item) => item.id === modeId) ?? MODES[0];
+  const active = sessions.find((session) => session.id === activeId);
+  const messages = active?.messages ?? [];
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [messages, loading]);
+    try {
+      const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]") as Session[];
+      setSessions(Array.isArray(stored) ? stored : []);
+      setActiveId(stored[0]?.id || "");
+      setModeId(localStorage.getItem(MODE_KEY) || "analyst");
+    } catch {
+      setSessions([]);
+    }
+  }, []);
 
   useEffect(() => {
-    const textarea = textareaRef.current;
-    if (!textarea) return;
-    textarea.style.height = "auto";
-    textarea.style.height = `${Math.min(textarea.scrollHeight, 180)}px`;
+    if (sessions.length) localStorage.setItem(STORAGE_KEY, JSON.stringify(sessions.slice(0, 30)));
+  }, [sessions]);
+
+  useEffect(() => { localStorage.setItem(MODE_KEY, modeId); }, [modeId]);
+
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [messages.length, messages[messages.length - 1]?.content, loading]);
+
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 190)}px`;
   }, [input]);
+
+  const filteredSessions = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return sessions.filter((s) => !q || s.title.toLowerCase().includes(q) || s.mode.toLowerCase().includes(q));
+  }, [sessions, search]);
+
+  function persistSession(next: Session) {
+    setSessions((current) => [next, ...current.filter((s) => s.id !== next.id)].sort((a, b) => b.updated - a.updated).slice(0, 30));
+  }
+
+  function newSession() {
+    if (loading) return;
+    const session: Session = { id: makeId(), title: "New strategic session", mode: mode.name, updated: Date.now(), messages: [] };
+    persistSession(session);
+    setActiveId(session.id);
+    setInput("");
+    setError("");
+    setSidebarOpen(false);
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  }
+
+  function ensureSession(text: string) {
+    if (active) return active;
+    const session: Session = { id: makeId(), title: makeTitle(text), mode: mode.name, updated: Date.now(), messages: [] };
+    persistSession(session);
+    setActiveId(session.id);
+    return session;
+  }
 
   async function sendMessage(event?: FormEvent) {
     event?.preventDefault();
     const text = input.trim();
     if (!text || loading) return;
-
-    const nextMessages: Message[] = [...messages, { role: "user", content: text }];
-    setMessages(nextMessages);
+    const session = ensureSession(text);
+    const userMessage: Message = { role: "user", content: text };
+    const nextMessages = [...session.messages, userMessage];
+    const nextSession = { ...session, title: session.messages.length ? session.title : makeTitle(text), mode: mode.name, updated: Date.now(), messages: nextMessages };
+    persistSession(nextSession);
+    setActiveId(nextSession.id);
     setInput("");
     setError("");
+    setNotice("");
     setLoading(true);
+    const controller = new AbortController();
+    abortRef.current = controller;
 
     try {
       const response = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: nextMessages }),
+        signal: controller.signal,
+        body: JSON.stringify({ messages: nextMessages, mode: mode.id, modePrompt: mode.prompt }),
       });
       const data = (await response.json()) as { message?: string; error?: string };
       if (!response.ok || !data.message) throw new Error(data.error || "The analyst is unavailable.");
-      setMessages((current) => [...current, { role: "assistant", content: data.message! }]);
+      persistSession({ ...nextSession, updated: Date.now(), messages: [...nextMessages, { role: "assistant", content: data.message }] });
     } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
       setError(err instanceof Error ? err.message : "Something went wrong.");
     } finally {
+      abortRef.current = null;
       setLoading(false);
-      textareaRef.current?.focus();
+      requestAnimationFrame(() => textareaRef.current?.focus());
     }
   }
 
-  function clearChat() {
+  function stopGeneration() { abortRef.current?.abort(); setLoading(false); }
+
+  function deleteSession(id: string) {
     if (loading) return;
-    setMessages([]);
-    setError("");
-    setInput("");
-    requestAnimationFrame(() => textareaRef.current?.focus());
+    setSessions((current) => current.filter((s) => s.id !== id));
+    if (activeId === id) {
+      const next = sessions.find((s) => s.id !== id);
+      setActiveId(next?.id || "");
+    }
   }
+
+  function clearAllSessions() {
+    if (loading || !window.confirm("Delete all local GwenSick sessions? This cannot be undone.")) return;
+    localStorage.removeItem(STORAGE_KEY);
+    setSessions([]); setActiveId(""); setSettingsOpen(false);
+  }
+
+  async function copyMessage(text: string, index: number) {
+    try { await navigator.clipboard.writeText(text); setCopiedIndex(index); setTimeout(() => setCopiedIndex(null), 1200); } catch { setNotice("Clipboard access unavailable."); }
+  }
+
+  function exportSession() {
+    if (!active) return;
+    const content = `GWENSICK / ${active.title}\nMODE: ${active.mode}\n${new Date(active.updated).toISOString()}\n\n${active.messages.map((m) => `${m.role.toUpperCase()}\n${m.content}`).join("\n\n")}`;
+    const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob); const a = document.createElement("a");
+    a.href = url; a.download = `${active.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "gwensick-session"}.txt`; a.click(); URL.revokeObjectURL(url);
+  }
+
+  function chooseStarter(text: string) { setInput(text); requestAnimationFrame(() => textareaRef.current?.focus()); }
 
   return (
     <main className="app-shell">
-      <div className="ambient ambient-one" />
-      <div className="ambient ambient-two" />
-
-      <section className="workspace" aria-label="GwenSick strategic AI workspace">
-        <header className="topbar">
-          <div className="brand-lockup">
-            <div className="brand-mark" aria-hidden="true"><span>G</span></div>
-            <div>
-              <div className="brand-name">GWENSICK</div>
-              <div className="brand-subtitle">STRATEGIC INTELLIGENCE</div>
-            </div>
+      <div className="ambient ambient-one" /><div className="ambient ambient-two" />
+      <div className={`shell ${sidebarOpen ? "sidebar-visible" : ""}`}>
+        <aside className="sidebar">
+          <div className="sidebar-brand"><div className="brand-mark"><span>G</span></div><div><b>GWENSICK</b><small>STRATEGIC INTELLIGENCE</small></div></div>
+          <button className="new-session" onClick={newSession}><Icon name="plus" /> NEW SESSION</button>
+          <div className="side-section">
+            <div className="side-label">WORKSPACE</div>
+            <button className="side-item active"><span className="side-dot" /> Analyst desk <kbd>01</kbd></button>
+            <button className="side-item" onClick={() => setSettingsOpen(true)}><Icon name="spark" /> System settings</button>
           </div>
+          <div className="history-head"><span>LOCAL SESSIONS</span><span>{sessions.length}</span></div>
+          <div className="session-list">
+            {filteredSessions.length ? filteredSessions.map((session) => (
+              <button className={`session-item ${session.id === activeId ? "selected" : ""}`} key={session.id} onClick={() => { setActiveId(session.id); setSidebarOpen(false); }}>
+                <span className="session-title">{session.title}</span><span className="session-meta">{session.messages.length} entries · {session.mode}</span>
+              </button>
+            )) : <div className="empty-history">No matching sessions.</div>}
+          </div>
+          <div className="sidebar-bottom"><div className="local-badge"><span /> LOCAL STORAGE</div><small>Sessions stay on this device until accounts are introduced.</small></div>
+        </aside>
+        {sidebarOpen && <button className="sidebar-backdrop" aria-label="Close navigation" onClick={() => setSidebarOpen(false)} />}
 
-          <div className="topbar-actions">
-            <div className="system-status"><span className="status-pulse" /> SYSTEM ONLINE</div>
-            {messages.length > 0 && (
-              <button className="clear-button" type="button" onClick={clearChat} disabled={loading}>NEW SESSION</button>
+        <section className="main-panel">
+          <header className="topbar">
+            <button className="icon-button menu-button" aria-label="Open navigation" onClick={() => setSidebarOpen(true)}><Icon name="menu" /></button>
+            <div className="session-heading"><span>{active ? "SESSION / ACTIVE" : "ANALYST DESK / 01"}</span><strong>{active?.title || "Strategic intelligence workspace"}</strong></div>
+            <div className="top-actions">
+              <div className="online"><span /> ONLINE</div>
+              <div className="mode-wrap">
+                <button className="mode-button" onClick={() => setModeOpen((v) => !v)} aria-expanded={modeOpen}>{mode.name}<Icon name="chevron" /></button>
+                {modeOpen && <div className="mode-menu">{MODES.map((item) => <button key={item.id} className={item.id === modeId ? "chosen" : ""} onClick={() => { setModeId(item.id); setModeOpen(false); }}><b>{item.name}</b><small>{item.description}</small></button>)}</div>}
+              </div>
+              <button className="icon-button" onClick={newSession} aria-label="New session"><Icon name="plus" /></button>
+            </div>
+          </header>
+
+          <div className="conversation">
+            {messages.length === 0 ? (
+              <div className="welcome-expanded">
+                <div className="hero-kicker"><span /> GWENSICK CORE / {mode.name} MODE</div>
+                <h1>Think sharper.<br /><em>Move sooner.</em></h1>
+                <p>Strategic intelligence for decisions, execution, analysis, and competitive thinking. GwenSick is built to challenge the plan—not just applaud it.</p>
+                <div className="starter-grid">{STARTERS.map(([num, title, description]) => <button key={num} onClick={() => chooseStarter(description)}><span>{num}</span><b>{title}</b><small>{description}</small><i>↗</i></button>)}</div>
+                <div className="system-strip"><span><i /> {mode.name} ENGINE</span><span>PRIVATE / LOCAL SESSION</span><span>CONTEXT WINDOW / 40 ENTRIES</span></div>
+              </div>
+            ) : (
+              <div className="thread">
+                <div className="thread-intro"><div><span>MODE / {mode.name}</span><b>{mode.description}</b></div><button onClick={exportSession}><Icon name="download" /> EXPORT</button></div>
+                {messages.map((message, index) => (
+                  <article className={`message ${message.role}`} key={`${index}-${message.role}`}>
+                    <div className="message-rail"><span>{message.role === "user" ? "OPERATOR" : "GWENSICK"}</span><small>{String(index + 1).padStart(2, "0")}</small></div>
+                    <div className="message-body"><div className="message-text">{message.content}</div>{message.role === "assistant" && <div className="message-actions"><button onClick={() => copyMessage(message.content, index)}><Icon name="copy" /> {copiedIndex === index ? "COPIED" : "COPY"}</button>{index === messages.length - 1 && !loading && <button onClick={() => chooseStarter("Reconsider your last answer. Find the strongest counterargument, then give me the corrected verdict.")}><Icon name="spark" /> CHALLENGE</button>}</div>}</div>
+                  </article>
+                ))}
+                {loading && <article className="message assistant"><div className="message-rail"><span>GWENSICK</span><small>•••</small></div><div className="message-body"><div className="analysis-state"><span /><span /><span /><b>ANALYZING {mode.name}</b></div></div></article>}
+                <div ref={endRef} />
+              </div>
             )}
           </div>
-        </header>
 
-        <div className={`conversation ${messages.length > 0 ? "has-messages" : ""}`}>
-          {messages.length === 0 ? (
-            <div className="welcome">
-              <div className="eyebrow"><span /> ANALYST DESK / 01</div>
-              <h1>Make the <em>next</em><br />move count.</h1>
-              <p className="welcome-copy">GwenSick is a strategic AI for competitive players, team staff, and operators. Bring a decision, a problem, or an idea. Leave with a clearer read.</p>
+          <div className="composer-zone">
+            {error && <div className="error" role="alert"><span>!</span><div><b>REQUEST FAILED</b><small>{error}</small></div></div>}
+            {notice && <div className="notice">{notice}</div>}
+            <form className="composer" onSubmit={sendMessage}>
+              <div className="composer-top"><span>INPUT / {mode.name}</span><span>{input.length.toLocaleString()} / 12,000</span></div>
+              <div className="composer-row"><textarea ref={textareaRef} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void sendMessage(); } }} placeholder={mode.id === "analyst" ? "Bring me the decision." : `What are we solving in ${mode.name.toLowerCase()} mode?`} maxLength={12000} rows={1} disabled={loading} aria-label="Message GwenSick" /><button type={loading ? "button" : "submit"} className="send-button" onClick={loading ? stopGeneration : undefined} disabled={!input.trim() && !loading}>{loading ? <><Icon name="stop" /> STOP</> : <><span>SEND</span><Icon name="send" /></>}</button></div>
+              <div className="composer-bottom"><span>SHIFT + ENTER / NEW LINE</span><span>AI OUTPUT REQUIRES HUMAN JUDGMENT</span></div>
+            </form>
+          </div>
+        </section>
+      </div>
 
-              <div className="prompt-grid">
-                {starterPrompts.map((prompt, index) => (
-                  <button className="prompt-card" key={prompt.title} type="button" onClick={() => { setInput(prompt.text); textareaRef.current?.focus(); }}>
-                    <span className="prompt-index">0{index + 1}</span>
-                    <span className="prompt-title">{prompt.title}</span>
-                    <span className="prompt-arrow">↗</span>
-                  </button>
-                ))}
-              </div>
-
-              <div className="capability-row">
-                <span>DECISION SUPPORT</span><i />
-                <span>STRATEGY</span><i />
-                <span>ANALYSIS</span><i />
-                <span>PLANNING</span>
-              </div>
-            </div>
-          ) : (
-            <div className="thread">
-              <div className="thread-head"><span>SESSION / ACTIVE</span><span>{messages.length} {messages.length === 1 ? "ENTRY" : "ENTRIES"}</span></div>
-              {messages.map((message, index) => (
-                <article className={`message ${message.role}`} key={`${message.role}-${index}`}>
-                  <div className="message-meta">
-                    <span className="message-role">{message.role === "user" ? "OPERATOR" : "GWENSICK"}</span>
-                    <span className="message-number">{String(index + 1).padStart(2, "0")}</span>
-                  </div>
-                  <div className="message-content">{message.content}</div>
-                </article>
-              ))}
-              {loading && (
-                <article className="message assistant">
-                  <div className="message-meta"><span className="message-role">GWENSICK</span><span className="message-number">•••</span></div>
-                  <div className="thinking"><span /><span /><span /><b>ANALYZING</b></div>
-                </article>
-              )}
-              <div ref={messagesEndRef} />
-            </div>
-          )}
-        </div>
-
-        <div className="input-zone">
-          {error && <div className="error" role="alert"><span>!</span>{error}</div>}
-          <form className="composer" onSubmit={sendMessage}>
-            <div className="composer-label">MESSAGE / <span>SHIFT + ENTER FOR NEW LINE</span></div>
-            <div className="composer-row">
-              <textarea
-                ref={textareaRef}
-                value={input}
-                onChange={(event) => setInput(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" && !event.shiftKey) {
-                    event.preventDefault();
-                    void sendMessage();
-                  }
-                }}
-                placeholder="What are we solving?"
-                rows={1}
-                maxLength={12000}
-                disabled={loading}
-                aria-label="Message GwenSick"
-              />
-              <button className="send-button" type="submit" disabled={!input.trim() || loading} aria-label="Send message">
-                <span>{loading ? "…" : "SEND"}</span><b>↗</b>
-              </button>
-            </div>
-            <div className="composer-foot"><span>GWENSICK / PRIVATE ANALYST SESSION</span><span>{input.length.toLocaleString()} / 12,000</span></div>
-          </form>
-          <footer>AI analysis can be wrong. Verify consequential information before acting.</footer>
-        </div>
-      </section>
+      {settingsOpen && <div className="modal-layer" role="dialog" aria-modal="true"><div className="settings-modal"><div className="modal-head"><div><span>SYSTEM / CONFIGURATION</span><h2>Workspace controls</h2></div><button className="icon-button" onClick={() => setSettingsOpen(false)}><Icon name="close" /></button></div><div className="setting-row"><div><b>Storage</b><small>Sessions are currently persisted in browser localStorage.</small></div><strong>LOCAL</strong></div><div className="setting-row"><div><b>Active intelligence mode</b><small>{mode.name} — {mode.description}</small></div><strong>ACTIVE</strong></div><button className="danger-button" onClick={clearAllSessions}><Icon name="trash" /> DELETE ALL LOCAL SESSIONS</button></div></div>}
     </main>
   );
 }
