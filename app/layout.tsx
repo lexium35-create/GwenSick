@@ -1,11 +1,16 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import "./workspace.css";
 
 export const metadata: Metadata = {
   title: "GwenSick — Strategic Intelligence",
-  description: "Strategic AI intelligence for competitive players, teams, and operators.",
-  viewport: "width=device-width, initial-scale=1, viewport-fit=cover",
+  description: "Strategic AI intelligence for people making decisions under pressure.",
+};
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
