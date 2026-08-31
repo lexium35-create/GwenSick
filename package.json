@@ -3,14 +3,14 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
+    "dev": "next dev --webpack",
+    "build": "next build --webpack",
     "start": "next start",
     "lint": "next lint"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "latest",
     "next": "latest",
-    "openai": "latest",
     "react": "latest",
     "react-dom": "latest"
   },
@@ -18,6 +18,6 @@
     "@types/node": "latest",
     "@types/react": "latest",
     "@types/react-dom": "latest",
-    "typescript": "latest"
+    "typescript": "5.9.3"
   }
 }
