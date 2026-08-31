@@ -10,4 +10,6 @@ export type AIProvider = {
 export type AIProviderConfig = {
   apiKey: string;
   model: string;
+  mode?: string;
+  modePrompt?: string;
 };
