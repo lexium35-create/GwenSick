@@ -116,22 +116,14 @@ async function requestChatCompletions(apiKey: string, model: string, messages: C
       "Content-Type": "application/json",
       Accept: "application/json",
     },
-    body: JSON.stringify({
-      model,
-      messages,
-      max_tokens: 2048,
-      stream: false,
-    }),
+    body: JSON.stringify({ model, messages, max_tokens: 2048, stream: false }),
   }, REQUEST_TIMEOUT_MS);
 
   const data = await readBody(response);
   return { response, data, content: extractChatCompletion(data) };
 }
 
-async function requestAnthropicMessages(apiKey: string, model: string, messages: ChatMessage[]) {
-  const system = messages.find((message) => message.role === "system")?.content;
-  const conversation = messages.filter((message) => message.role !== "system");
-
+async function requestAnthropicMessages(apiKey: string, model: string, system: string, messages: ChatMessage[]) {
   const response = await fetchWithTimeout(`${getBaseUrl()}/messages`, {
     method: "POST",
     headers: {
@@ -141,13 +133,7 @@ async function requestAnthropicMessages(apiKey: string, model: string, messages:
       "Content-Type": "application/json",
       Accept: "application/json",
     },
-    body: JSON.stringify({
-      model,
-      ...(system ? { system } : {}),
-      messages: conversation,
-      max_tokens: 2048,
-      stream: false,
-    }),
+    body: JSON.stringify({ model, system, messages, max_tokens: 2048, stream: false }),
   }, REQUEST_TIMEOUT_MS);
 
   const data = await readBody(response);
@@ -162,40 +148,32 @@ export function createSeekAIProvider(config: AIProviderConfig): AIProvider {
 
   return {
     async respond(messages: ChatMessage[]) {
-      const normalizedMessages: ChatMessage[] = [
-        { role: "user", content: systemPrompt },
-        ...messages,
-      ];
-
       try {
         if (isClaudeModel(config.model)) {
-          const anthropicMessages = await requestAnthropicMessages(config.apiKey, config.model, [
-            { role: "system", content: systemPrompt },
-            ...messages,
-          ]);
-          if (anthropicMessages.response.ok && anthropicMessages.content) return anthropicMessages.content;
+          const anthropic = await requestAnthropicMessages(config.apiKey, config.model, systemPrompt, messages);
+          if (anthropic.response.ok && anthropic.content) return anthropic.content;
 
-          if (!anthropicMessages.response.ok && !shouldTryAlternateProtocol(anthropicMessages.response.status, anthropicMessages.data)) {
-            throw new Error(`SeekAI Claude request failed: ${errorDetail(anthropicMessages.response.status, anthropicMessages.data)}`);
+          if (!anthropic.response.ok && !shouldTryAlternateProtocol(anthropic.response.status, anthropic.data)) {
+            throw new Error(`SeekAI Claude request failed: ${errorDetail(anthropic.response.status, anthropic.data)}`);
           }
 
-          const fallback = await requestChatCompletions(config.apiKey, config.model, normalizedMessages);
+          const fallback = await requestChatCompletions(config.apiKey, config.model, [
+            { role: "user", content: systemPrompt },
+            ...messages,
+          ]);
           if (fallback.response.ok && fallback.content) return fallback.content;
           throw new Error(`SeekAI request failed for ${config.model}: ${errorDetail(fallback.response.status, fallback.data)}`);
         }
 
         const chat = await requestChatCompletions(config.apiKey, config.model, [
-          { role: "system", content: systemPrompt },
+          { role: "user", content: systemPrompt },
           ...messages,
         ]);
         if (chat.response.ok && chat.content) return chat.content;
-
-        if (chat.response.ok) {
-          throw new Error(`SeekAI returned an empty assistant response for ${config.model}.`);
-        }
+        if (chat.response.ok) throw new Error(`SeekAI returned an empty assistant response for ${config.model}.`);
 
         if (shouldTryAlternateProtocol(chat.response.status, chat.data)) {
-          const fallback = await requestAnthropicMessages(config.apiKey, config.model, messages);
+          const fallback = await requestAnthropicMessages(config.apiKey, config.model, systemPrompt, messages);
           if (fallback.response.ok && fallback.content) return fallback.content;
         }
 
@@ -224,10 +202,7 @@ export type SeekAIModel = {
 export async function listSeekAIModels(apiKey: string): Promise<SeekAIModel[]> {
   try {
     const response = await fetchWithTimeout(`${getBaseUrl()}/models`, {
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        Accept: "application/json",
-      },
+      headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
     }, MODEL_TIMEOUT_MS);
     const data = await readBody(response);
     if (!response.ok) throw new Error(`SeekAI model discovery failed: ${errorDetail(response.status, data)}`);
