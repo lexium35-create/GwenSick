@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import "./workspace.css";
+import "./mobile.css";
 
 export const metadata: Metadata = {
   title: "GwenSick — Strategic Intelligence",
