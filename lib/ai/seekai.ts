@@ -1,6 +1,9 @@
 import type { AIProvider, AIProviderConfig, ChatMessage } from "./provider";
 
 const DEFAULT_BASE_URL = "https://seekai.cc/v1";
+const REQUEST_TIMEOUT_MS = 60_000;
+const MODEL_TIMEOUT_MS = 20_000;
+
 const CORE_PROMPT = `You are GwenSick, a strategic intelligence operator for people making decisions under pressure.
 
 VOICE
@@ -23,46 +26,74 @@ CAPABILITY
 MEMORY
 - Use only context supplied in the conversation or explicitly provided by the application. Never invent prior interactions, preferences, or facts.`;
 
+function getBaseUrl() {
+  return (process.env.SEEKAI_BASE_URL?.trim() || DEFAULT_BASE_URL).replace(/\/$/, "");
+}
+
+async function readBody(response: Response): Promise<unknown> {
+  const text = await response.text();
+  if (!text.trim()) return null;
+  try { return JSON.parse(text) as unknown; } catch { return text; }
+}
+
+function errorDetail(status: number, data: unknown) {
+  if (typeof data === "string" && data.trim()) return data.trim().slice(0, 1000);
+  if (data && typeof data === "object" && "error" in data) {
+    const value = (data as { error: unknown }).error;
+    if (typeof value === "string") return value.slice(0, 1000);
+    try { return JSON.stringify(value).slice(0, 1000); } catch { return "Unknown upstream error."; }
+  }
+  return `SeekAI returned HTTP ${status}.`;
+}
+
 export function createSeekAIProvider(config: AIProviderConfig): AIProvider {
-  const baseUrl = (process.env.SEEKAI_BASE_URL?.trim() || DEFAULT_BASE_URL).replace(/\/$/, "");
   const modeBlock = config.modePrompt?.trim()
     ? `\n\nACTIVE MODE: ${config.mode || "analyst"}\n${config.modePrompt.trim()}`
     : "";
 
   return {
     async respond(messages: ChatMessage[]) {
-      const response = await fetch(`${baseUrl}/chat/completions`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${config.apiKey}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          model: config.model,
-          messages: [{ role: "system", content: `${CORE_PROMPT}${modeBlock}` }, ...messages],
-          max_tokens: 2048,
-          stream: false,
-        }),
-        cache: "no-store",
-      });
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+      try {
+        const response = await fetch(`${getBaseUrl()}/chat/completions`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${config.apiKey}`,
+            "Content-Type": "application/json",
+            Accept: "application/json",
+          },
+          body: JSON.stringify({
+            model: config.model,
+            messages: [{ role: "system", content: `${CORE_PROMPT}${modeBlock}` }, ...messages],
+            max_tokens: 2048,
+            stream: false,
+          }),
+          cache: "no-store",
+          signal: controller.signal,
+        });
 
-      const data: unknown = await response.json().catch(() => null);
-      if (!response.ok) {
-        const detail = data && typeof data === "object" && "error" in data
-          ? JSON.stringify((data as { error: unknown }).error)
-          : `SeekAI returned HTTP ${response.status}`;
-        throw new Error(`SeekAI request failed: ${detail}`);
+        const data = await readBody(response);
+        if (!response.ok) throw new Error(`SeekAI request failed: ${errorDetail(response.status, data)}`);
+
+        const content = data && typeof data === "object" && "choices" in data
+          ? (data as { choices?: Array<{ message?: { content?: unknown } }> }).choices?.[0]?.message?.content
+          : undefined;
+        if (typeof content !== "string" || !content.trim()) {
+          throw new Error("SeekAI returned no assistant text. Check the selected model and API compatibility.");
+        }
+        return content.trim();
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") {
+          throw new Error("SeekAI request timed out after 60 seconds.");
+        }
+        if (error instanceof TypeError) {
+          throw new Error(`Could not reach SeekAI at ${getBaseUrl()}. Check SEEKAI_BASE_URL and network access.`);
+        }
+        throw error;
+      } finally {
+        clearTimeout(timeout);
       }
-
-      const content = data && typeof data === "object" && "choices" in data
-        ? (data as { choices?: Array<{ message?: { content?: unknown } }> }).choices?.[0]?.message?.content
-        : undefined;
-
-      if (typeof content !== "string" || !content.trim()) {
-        throw new Error("SeekAI returned no assistant text.");
-      }
-
-      return content.trim();
     },
   };
 }
@@ -76,25 +107,27 @@ export type SeekAIModel = {
 };
 
 export async function listSeekAIModels(apiKey: string): Promise<SeekAIModel[]> {
-  const baseUrl = (process.env.SEEKAI_BASE_URL?.trim() || DEFAULT_BASE_URL).replace(/\/$/, "");
-  const response = await fetch(`${baseUrl}/models`, {
-    headers: { Authorization: `Bearer ${apiKey}` },
-    cache: "no-store",
-  });
-
-  const data: unknown = await response.json().catch(() => null);
-  if (!response.ok) {
-    const detail = data && typeof data === "object" && "error" in data
-      ? JSON.stringify((data as { error: unknown }).error)
-      : `SeekAI returned HTTP ${response.status}`;
-    throw new Error(`SeekAI model discovery failed: ${detail}`);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), MODEL_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${getBaseUrl()}/models`, {
+      headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    const data = await readBody(response);
+    if (!response.ok) throw new Error(`SeekAI model discovery failed: ${errorDetail(response.status, data)}`);
+    if (!data || typeof data !== "object" || !Array.isArray((data as { data?: unknown }).data)) {
+      throw new Error("SeekAI returned an invalid model catalogue.");
+    }
+    return (data as { data: SeekAIModel[] }).data
+      .filter((model) => model && typeof model.id === "string" && model.id.trim().length > 0)
+      .sort((a, b) => a.id.localeCompare(b.id));
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") throw new Error("SeekAI model discovery timed out.");
+    if (error instanceof TypeError) throw new Error(`Could not reach SeekAI at ${getBaseUrl()}.`);
+    throw error;
+  } finally {
+    clearTimeout(timeout);
   }
-
-  if (!data || typeof data !== "object" || !Array.isArray((data as { data?: unknown }).data)) {
-    throw new Error("SeekAI returned an invalid model catalogue.");
-  }
-
-  return (data as { data: SeekAIModel[] }).data
-    .filter((model) => model && typeof model.id === "string" && model.id.trim().length > 0)
-    .sort((a, b) => a.id.localeCompare(b.id));
 }
